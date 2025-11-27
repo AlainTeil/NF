@@ -1,0 +1,16 @@
+[benchmark]
+repetitions = 1
+concurrent_workers = 4
+output_dir = "reports"
+
+[graph]
+graph_sizes = ["small", "medium", "large"]
+graph_densities = ["sparse", "medium", "dense"]
+
+[logging]
+log_level = "INFO"
+log_format = "text"
+
+[telemetry]
+enable_tracemalloc = false
+enable_psutil = false

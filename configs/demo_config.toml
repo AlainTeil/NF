@@ -1,0 +1,15 @@
+[benchmark]
+repetitions = 1
+concurrent_workers = 2
+output_dir = "reports"
+
+[graph]
+graph_sizes = ["small"]
+graph_densities = ["sparse", "medium"]
+
+[algorithms]
+algorithms = ["edmonds_karp", "dinitz"]
+
+[logging]
+log_level = "INFO"
+log_format = "text"
