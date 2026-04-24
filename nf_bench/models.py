@@ -1,9 +1,9 @@
 """Data models used across the network-flow benchmarking suite."""
 from __future__ import annotations
 
+from collections.abc import Hashable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional
 
 import networkx as nx
 
@@ -21,19 +21,25 @@ class FlowBenchmarkSummary:
     """Aggregates a shared flow value and per-algorithm timing metrics."""
 
     flow_value: float
-    metrics: Dict[str, FlowMetric]
+    metrics: dict[str, FlowMetric]
 
 
 @dataclass(frozen=True)
 class BenchmarkGraph:
-    """Descriptors for generated test graphs."""
+    """Descriptors for generated test graphs.
+
+    The wrapped ``graph`` itself is a mutable :class:`networkx.DiGraph`; the
+    dataclass is frozen only to prevent accidental rebinding of the descriptor
+    fields.
+    """
 
     name: str
     graph: nx.DiGraph
-    source: int
-    sink: int
+    source: Hashable
+    sink: Hashable
     size_label: str
     density_label: str
+    fallback: bool = False
 
 
 @dataclass(frozen=True)
@@ -41,23 +47,25 @@ class BenchmarkConfig:
     """Runtime configuration for the CLI benchmark run."""
 
     repetitions: int
-    seed: Optional[int]
+    seed: int | None
     output_dir: Path
-    graph_sizes: Optional[List[str]] = None
-    graph_densities: Optional[List[str]] = None
-    algorithms: Optional[List[str]] = None
-    graph_families: Optional[List[str]] = None
-    max_nodes: Optional[int] = None
+    graph_sizes: list[str] | None = None
+    graph_densities: list[str] | None = None
+    algorithms: list[str] | None = None
+    graph_families: list[str] | None = None
+    max_nodes: int | None = None
     capacity_distribution: str = "uniform"
-    edge_probability_overrides: Optional[Dict[str, float]] = None
+    edge_probability_overrides: dict[str, float] | None = None
     write_csv: bool = True
     write_plots: bool = True
     write_markdown: bool = False
     write_json: bool = False
-    algorithm_registry: Optional[Dict[str, str]] = None
-    concurrent_workers: Optional[int] = None
-    extra_reporters: Optional[List[str]] = None
+    algorithm_registry: dict[str, str | None] | None = None
+    concurrent_workers: int | None = None
+    extra_reporters: list[str] | None = None
     log_level: str = "INFO"
     log_format: str = "text"
     enable_tracemalloc: bool = False
     enable_psutil: bool = False
+    flow_rel_tol: float = 1e-6
+    flow_abs_tol: float = 1e-9

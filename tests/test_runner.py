@@ -64,6 +64,7 @@ def test_run_benchmarks_accepts_algorithm_subset(simple_test_graph: BenchmarkGra
     assert set(results["algorithm"].unique()) == set(subset)
 
 
+@pytest.mark.slow
 def test_run_benchmarks_respects_max_nodes() -> None:
     results = run_benchmarks(max_nodes=500, repetitions=1)
 

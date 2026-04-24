@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any
 
 import pandas as pd
 
@@ -14,7 +14,7 @@ from nf_bench.reporting import (
 
 
 def custom_reporter(
-    df: pd.DataFrame, output_dir: Path, metadata: Dict[str, Any], summary_text: str
+    df: pd.DataFrame, output_dir: Path, metadata: dict[str, Any], summary_text: str
 ) -> Path:
     path = output_dir / "custom_report.txt"
     path.write_text("custom reporter invoked\n" + summary_text.splitlines()[0])

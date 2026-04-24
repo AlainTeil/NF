@@ -5,7 +5,7 @@ import logging
 import os
 import tracemalloc
 from time import perf_counter
-from typing import Any, Dict, Optional
+from typing import Any
 
 try:  # Optional dependency for richer telemetry
     import psutil  # type: ignore
@@ -14,7 +14,15 @@ except ImportError:  # pragma: no cover - executed when psutil unavailable
 
 
 class TelemetryCollector:
-    """Collects wall-clock/memory telemetry for a benchmark run."""
+    """Collects wall-clock/memory telemetry for a benchmark run.
+
+    .. note::
+        ``tracemalloc`` and ``psutil`` measurements are process-global. When
+        ``run_benchmarks`` is invoked with ``concurrent_workers > 1`` the
+        captured peak/RSS values reflect the union of all worker threads, not
+        any individual benchmark task. Treat the numbers as run-level rather
+        than per-task in that mode.
+    """
 
     def __init__(
         self,
@@ -27,9 +35,9 @@ class TelemetryCollector:
         self._psutil_requested = enable_psutil
         self._started = False
         self._start_time = 0.0
-        self._start_cpu: Optional[Any] = None
-        self._start_rss: Optional[int] = None
-        self._process: Optional[Any] = None
+        self._start_cpu: Any | None = None
+        self._start_rss: int | None = None
+        self._process: Any | None = None
 
         if enable_psutil and psutil is None:
             logging.getLogger(__name__).warning(
@@ -52,7 +60,7 @@ class TelemetryCollector:
                 self._start_rss = mem.rss
                 self._start_cpu = self._process.cpu_times()
 
-    def stop(self) -> Dict[str, Any]:
+    def stop(self) -> dict[str, Any]:
         """Stop telemetry collection and return the captured metrics."""
 
         if not self._started:
@@ -61,7 +69,7 @@ class TelemetryCollector:
         wall_clock = perf_counter() - self._start_time
         self._started = False
 
-        telemetry: Dict[str, Any] = {
+        telemetry: dict[str, Any] = {
             "wall_clock_seconds": wall_clock,
             "tracemalloc_enabled": self.enable_tracemalloc,
             "psutil_requested": self._psutil_requested,
@@ -99,7 +107,7 @@ class TelemetryCollector:
         return telemetry
 
 
-def _diff_cpu(current: float, start_cpu: Optional[Any], attr: str) -> float:
+def _diff_cpu(current: float, start_cpu: Any | None, attr: str) -> float:
     """Compute cpu time deltas even when psutil start snapshots are missing."""
 
     if start_cpu is None:

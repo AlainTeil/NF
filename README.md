@@ -14,23 +14,23 @@ Network Flow Bench (nf-bench) is a small benchmarking harness for comparing Netw
 ## Installation
 
 ```bash
-# developer workflow (includes pytest + ruff)
+# developer workflow (pytest, pytest-cov, ruff, mypy, pre-commit, hypothesis)
 pip install -e .[dev]
 
 # add psutil-powered telemetry collectors
 pip install -e .[dev,telemetry]
 
-# opt into plotting stack separately when trimming dependencies
-pip install -e .[dev,plots]
+# enable YAML config files
+pip install -e .[dev,yaml]
 ```
 
-The editable install pulls in the runtime stack (NetworkX, pandas, seaborn, matplotlib) and developer extras (pytest, ruff). The `telemetry` extra installs `psutil` so that enhanced resource metrics can be captured, while the optional `plots` extra lets downstream automation defer heavyweight plotting libraries when they are not required.
+The editable install pulls in the runtime stack (NetworkX, pandas, seaborn, matplotlib) and developer extras (pytest, pytest-cov, ruff, mypy, pre-commit, hypothesis). The `telemetry` extra installs `psutil` so enhanced resource metrics can be captured, and `yaml` adds PyYAML for `*.yaml` configuration files.
 
 ## Quick Start
 
 ```bash
 # Benchmark all default graphs and algorithms
-python -m nf_bench.cli --repetitions 1 --seed 42 --output-dir reports
+python3 -m nf_bench.cli --repetitions 1 --seed 42 --output-dir reports
 
 # Or use the packaged console script (after installation)
 nf-bench --graph-sizes small medium --graph-densities sparse dense \
@@ -52,13 +52,16 @@ nf-bench ships with instrumentation so large campaigns remain debuggable.
 - Telemetry collection is opt-in. Pass `--enable-tracemalloc` to gather Python allocator stats and `--enable-psutil` (with the optional dependency installed) to add detailed CPU/memory/process metrics. Captured telemetry is embedded in the saved metadata so later analyses remain reproducible.
 - Custom reporters can be layered on top of the built-ins with `--extra-reporter module:callable`. Each callable receives the full results DataFrame plus the generated metadata, making it easy to publish bespoke dashboards.
 
-Example CLI invocation that enables all instrumentation:
+Example CLI invocation that enables all instrumentation (omit `--extra-reporter` unless you have a real reporter to register):
 
 ```bash
 nf-bench --seed 7 --output-dir reports \
          --log-format json --log-level DEBUG \
-         --enable-tracemalloc --enable-psutil \
-         --extra-reporter my_project.reporters:export_results
+         --enable-tracemalloc --enable-psutil
+# To register your own reporter, replace ``my_project.reporters:export_results``
+# with a real dotted path and whitelist its prefix:
+#   export NF_BENCH_DYNAMIC_IMPORT_PREFIXES="my_project."
+#   nf-bench ... --extra-reporter my_project.reporters:export_results
 ```
 
 The same options can live in a TOML/YAML config file:
@@ -120,10 +123,101 @@ See the docstrings in `nf_bench/generators.py`, `nf_bench/runner.py`, and `nf_be
 
 ## Development
 
-Run the automated test suite:
+Run the automated test suite (pytest collects coverage by default; the 80% gate is enforced in CI):
 
 ```bash
-pytest
+pytest                       # full suite + coverage report
+pytest --cov-fail-under=80   # also enforce the 80% gate locally
+pytest -m "not slow"        # skip the slow-marked tests
+pytest -m integration       # only end-to-end CLI tests (subset; gate not enforced)
+ruff check .                 # lint
+mypy nf_bench                # static type-check
+pre-commit run --all-files  # run all hooks locally
 ```
 
-The project targets Python 3.11+. Static analysis via `ruff` (installed with the `dev` extra) keeps modules consistent; other formatters such as `black` can be layered on if desired.
+The project targets Python 3.11+. `ruff`, `mypy`, `pytest-cov`, and `pre-commit` ship with the `dev` extra; install hooks once with `pre-commit install`. CI runs the same gates on every push/PR via `.github/workflows/ci.yml`.
+
+## Exit Codes
+
+`nf-bench` returns the following process exit codes:
+
+| Code | Meaning                                                |
+| ---- | ------------------------------------------------------ |
+| `0`  | Success.                                               |
+| `2`  | Argparse usage error (e.g. unknown flag).              |
+| `3`  | Configuration error (file not found, invalid TOML…).   |
+| `4`  | Benchmark runtime failure not handled by the runner.   |
+
+When `--continue-on-error` mode is exposed via the Python API
+(`run_benchmarks(..., continue_on_error=True)`), per-task failures are
+collected on `df.attrs["failures"]` instead of aborting the run.
+
+## Reproducibility & Metadata
+
+Every run writes a `flow_metadata_<run_id>.json` file alongside the CSV/PNG
+artifacts. The schema is intentionally stable so downstream tooling can rely
+on it:
+
+```jsonc
+{
+  "timestamp_utc": "2025-01-02T03:04:05+00:00",
+  "run_id": "20250102T030405000000+0000",
+  "git_commit": "abc1234",            // best-effort; "unknown" if not in a git tree
+  "config_hash": "sha256-…",          // hash of the resolved BenchmarkConfig
+  "config": { /* snapshot used for the run */ },
+  "row_count": 42,
+  "graph_count": 6,
+  "telemetry": { /* optional, when --enable-* flags set */ },
+  "artifacts": { /* paths written for this run */ }
+}
+```
+
+All artifact files are written via temp-file + `os.replace`, so external
+watchers never observe partial writes.
+
+## Security Note: Dynamic Imports
+
+Both `--extra-reporter` and the algorithm registry accept dotted paths that
+are imported at runtime. To limit accidental code execution, nf-bench gates
+imports through an allow-list:
+
+- Anything under the built-in prefixes `networkx.` and `nf_bench.` is always
+  allowed.
+- To allow additional prefixes, set
+  `NF_BENCH_DYNAMIC_IMPORT_PREFIXES="myorg.,otherpkg."`.
+- To disable the gate entirely (not recommended in production), set
+  `NF_BENCH_ALLOW_DYNAMIC_IMPORT=1` — a warning will be logged for every
+  dynamic import so usage stays auditable.
+
+Attempts to load a callable that fails the gate raise `DynamicImportError`.
+
+## Troubleshooting
+
+- **`ConfigError: pyyaml is required to load YAML configuration files`** —
+  install the optional extra: `pip install -e .[yaml]`.
+- **Plot is missing when running on a server** — nf-bench forces the
+  matplotlib `Agg` backend before importing pyplot, but ensure your CI image
+  has the matplotlib font cache writable (`MPLCONFIGDIR`).
+- **`DynamicImportError` for an `--extra-reporter`** — see the security
+  note above; whitelist your module via `NF_BENCH_DYNAMIC_IMPORT_PREFIXES`.
+- **Unexpected results on Python `-O`** — assertions have been replaced by
+  explicit `RuntimeError`s; `-O` is therefore safe to use.
+- **`Unknown environment variable: NF_BENCH_…`** warning — indicates a
+  typo in an `NF_BENCH_*` env var; check the option name.
+
+## Data Flow
+
+```
+       ┌─────────────┐    ┌─────────────┐   ┌──────────────┐   ┌────────────────┐
+CLI ──▶│ load_config │──▶ │ generators  │─▶ │  runner.run  │──▶│ ReportManager  │──▶ artifacts/
+       │ (file/env/  │    │ build_test_ │   │ benchmarks() │   │ + metadata     │
+       │  CLI merge) │    │ graphs()    │   │              │   │                │
+       └─────────────┘    └─────────────┘   └──────┬───────┘   └────────────────┘
+                                                   │
+                                                   ▼
+                                            ┌──────────────┐
+                                            │  telemetry   │
+                                            │ (tracemalloc │
+                                            │  + psutil)   │
+                                            └──────────────┘
+```

@@ -2,12 +2,15 @@
 from __future__ import annotations
 
 import argparse
-import json
 import logging
+import sys
+from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
 
-from .config import load_config
+from . import __version__
+from ._encoding import safe_dumps
+from ._imports import DynamicImportError
+from .config import ConfigError, load_config
 from .generators import (
     DEFAULT_DENSITY_PROBABILITIES,
     DEFAULT_NODE_SIZES,
@@ -27,15 +30,22 @@ from .runner import (
 )
 from .telemetry import TelemetryCollector
 
-
 LoggerCallback = Callable[[str, dict], None]
+
+# Process exit codes returned by :func:`main`.
+EXIT_OK = 0
+EXIT_USAGE = 2
+EXIT_CONFIG = 3
+EXIT_RUNTIME = 4
+
+_logger = logging.getLogger(__name__)
 
 
 class JsonLogFormatter(logging.Formatter):
     """Simple JSON formatter for structured log lines."""
 
     def format(self, record: logging.LogRecord) -> str:  # type: ignore[override]
-        payload: Dict[str, object] = {
+        payload: dict[str, object] = {
             "timestamp": self.formatTime(record, "%Y-%m-%dT%H:%M:%S%z"),
             "level": record.levelname,
             "logger": record.name,
@@ -43,7 +53,7 @@ class JsonLogFormatter(logging.Formatter):
         }
         if record.exc_info:
             payload["exc_info"] = self.formatException(record.exc_info)
-        return json.dumps(payload, sort_keys=True)
+        return safe_dumps(payload, sort_keys=True)
 
 
 def configure_logging(level_name: str = "INFO", log_format: str = "text") -> None:
@@ -62,20 +72,57 @@ def configure_logging(level_name: str = "INFO", log_format: str = "text") -> Non
     root_logger.addHandler(handler)
 
 
-def log_event(event: str, data: Optional[dict] = None) -> None:
+def log_event(event: str, data: dict | None = None) -> None:
     """Emit a structured log line with JSON payload."""
 
     if data is None:
         data = {}
-    payload = json.dumps(data, sort_keys=True)
+    payload = safe_dumps(data, sort_keys=True)
     logging.getLogger(__name__).info("%s | %s", event, payload)
 
 
-def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse CLI arguments without resolving configuration defaults."""
 
     parser = argparse.ArgumentParser(
         description="Benchmark NetworkX maximum flow algorithms across generated graphs.",
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"nf-bench {__version__}",
+    )
+    parser.add_argument(
+        "--list-algorithms",
+        action="store_true",
+        help="List available max-flow algorithms and exit.",
+    )
+    parser.add_argument(
+        "--list-graph-families",
+        action="store_true",
+        help="List available graph families and exit.",
+    )
+    parser.add_argument(
+        "--list-graph-sizes",
+        action="store_true",
+        help="List available graph size labels and exit.",
+    )
+    parser.add_argument(
+        "--list-graph-densities",
+        action="store_true",
+        help="List available graph density labels and exit.",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Resolve configuration and exit without running benchmarks.",
+    )
+    parser.add_argument(
+        "--demo",
+        dest="run_demo",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Run the demo graph before the benchmark suite (default: enabled).",
     )
     parser.add_argument(
         "--config",
@@ -104,20 +151,26 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--graph-sizes",
         nargs="+",
-        choices=sorted(DEFAULT_NODE_SIZES.keys()),
-        help="Subset of graph size labels to benchmark (default: all).",
+        help=(
+            "Subset of graph size labels to benchmark (default: all). Known: "
+            f"{', '.join(sorted(DEFAULT_NODE_SIZES.keys()))}."
+        ),
     )
     parser.add_argument(
         "--graph-densities",
         nargs="+",
-        choices=sorted(DEFAULT_DENSITY_PROBABILITIES.keys()),
-        help="Subset of graph density labels to benchmark (default: all).",
+        help=(
+            "Subset of graph density labels to benchmark (default: all). Known: "
+            f"{', '.join(sorted(DEFAULT_DENSITY_PROBABILITIES.keys()))}."
+        ),
     )
     parser.add_argument(
         "--graph-families",
         nargs="+",
-        choices=sorted(list_graph_family_names()),
-        help="Subset of graph family names to include (default: all).",
+        help=(
+            "Subset of graph family names to include (default: all). Known: "
+            f"{', '.join(sorted(list_graph_family_names()))}."
+        ),
     )
     available_algorithms = ", ".join(list_flow_algorithm_names())
     parser.add_argument(
@@ -219,15 +272,42 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
 
 
 def main(
-    argv: Optional[List[str]] = None,
+    argv: list[str] | None = None,
     *,
-    log_callback: Optional[LoggerCallback] = None,
-) -> None:
-    """CLI entry point for running the benchmark workflow."""
+    log_callback: LoggerCallback | None = None,
+) -> int:
+    """CLI entry point for running the benchmark workflow.
 
-    args = parse_args(argv)
-    config = load_config(args)
+    Returns the process exit code (0 success, 2 usage, 3 config, 4 runtime).
+    """
+
+    try:
+        args = parse_args(argv)
+    except SystemExit as exc:  # argparse already printed; propagate code
+        return int(exc.code) if isinstance(exc.code, int) else EXIT_USAGE
+
+    # Informational, exit-immediately flags.
+    listing_handled = _handle_listing_flags(args)
+    if listing_handled:
+        return EXIT_OK
+
+    try:
+        config = load_config(args)
+    except ConfigError as exc:
+        print(f"Configuration error: {exc}", file=sys.stderr)
+        return EXIT_CONFIG
+
     configure_logging(config.log_level, config.log_format)
+    _validate_known_choices(args)
+
+    # Instantiate the report manager up front so a bad ``--extra-reporter``
+    # surfaces immediately rather than after a long benchmark run.
+    try:
+        report_manager = ReportManager.from_config(config)
+    except DynamicImportError as exc:
+        print(f"Configuration error: {exc}", file=sys.stderr)
+        return EXIT_CONFIG
+
     _emit(
         log_callback,
         "configuration_loaded",
@@ -254,18 +334,24 @@ def main(
         },
     )
 
+    if getattr(args, "dry_run", False):
+        _logger.info("Dry run requested; configuration resolved successfully.")
+        return EXIT_OK
+
     telemetry = TelemetryCollector(
         enable_tracemalloc=config.enable_tracemalloc,
         enable_psutil=config.enable_psutil,
     )
     telemetry.start()
 
-    demo_graph = build_demo_graph()
-    result = benchmark_flow_algorithms(demo_graph, source="s", sink="t")
-    _emit(log_callback, "demo_completed", {"flow_value": result.flow_value})
-    print(_format_metrics(result))
+    run_demo = True if getattr(args, "run_demo", None) is None else bool(args.run_demo)
+    if run_demo:
+        demo_graph = build_demo_graph()
+        result = benchmark_flow_algorithms(demo_graph, source="s", sink="t")
+        _emit(log_callback, "demo_completed", {"flow_value": result.flow_value})
+        _logger.info("Demo result:\n%s", _format_metrics(result))
 
-    print("\nRunning benchmark suite across generated graphs...\n")
+    _logger.info("Running benchmark suite across generated graphs...")
 
     graph_seed = config.seed if config.seed is not None else 42
     _emit(log_callback, "seed_initialized", {"seed": graph_seed})
@@ -286,10 +372,10 @@ def main(
         percent = int((completed / total) * 100)
         if percent != progress_tracker["last_percent"]:
             progress_tracker["last_percent"] = percent
-            print(f"Progress: {percent}% ({completed}/{total})")
+            _logger.info("Progress: %d%% (%d/%d)", percent, completed, total)
         _emit(log_callback, "progress_update", update)
 
-    telemetry_data: Dict[str, object] = {}
+    telemetry_data: dict[str, object] = {}
     summary_text = ""
     results = None
     try:
@@ -305,34 +391,75 @@ def main(
         )
         _emit(log_callback, "benchmark_suite_completed", {"record_count": len(results)})
         summary_text = format_summary_table(results)
-        print(summary_text)
+        _logger.info("Benchmark summary:\n%s", summary_text)
     finally:
         telemetry_data = telemetry.stop()
 
-    assert results is not None  # for type checkers
-    report_manager = ReportManager.from_config(config)
+    if results is None:
+        raise RuntimeError("Benchmark run did not produce a results frame.")
     metadata = build_report_metadata(
         config,
         row_count=len(results),
         graph_count=len(graphs),
         telemetry=telemetry_data,
     )
-    artefacts = report_manager.emit(
+    artifacts = report_manager.emit(
         results,
         summary_text=summary_text,
         metadata=metadata,
     )
     _emit(log_callback, "telemetry_summary", telemetry_data)
-    _emit(log_callback, "artefacts_saved", artefacts)
-    for key, value in artefacts.items():
+    _emit(log_callback, "artifacts_saved", artifacts)
+    for key, value in artifacts.items():
         if isinstance(value, list):
             for idx, item in enumerate(value, start=1):
-                print(f"Saved {key}[{idx}] to {item}")
+                _logger.info("Saved %s[%d] to %s", key, idx, item)
         else:
-            print(f"Saved {key} to {value}")
+            _logger.info("Saved %s to %s", key, value)
+    return EXIT_OK
 
 
-def _emit(callback: Optional[LoggerCallback], event: str, data: dict) -> None:
+def _handle_listing_flags(args: argparse.Namespace) -> bool:
+    """Print introspection listings if requested. Returns True if any printed."""
+
+    listed = False
+    if getattr(args, "list_algorithms", False):
+        for name in list_flow_algorithm_names():
+            print(name)
+        listed = True
+    if getattr(args, "list_graph_families", False):
+        for name in list_graph_family_names():
+            print(name)
+        listed = True
+    if getattr(args, "list_graph_sizes", False):
+        for name in sorted(DEFAULT_NODE_SIZES):
+            print(name)
+        listed = True
+    if getattr(args, "list_graph_densities", False):
+        for name in sorted(DEFAULT_DENSITY_PROBABILITIES):
+            print(name)
+        listed = True
+    return listed
+
+
+def _validate_known_choices(args: argparse.Namespace) -> None:
+    """Warn (do not abort) when CLI lists reference unknown labels."""
+
+    _warn_unknown(args.graph_sizes, set(DEFAULT_NODE_SIZES), "graph size")
+    _warn_unknown(args.graph_densities, set(DEFAULT_DENSITY_PROBABILITIES), "graph density")
+    _warn_unknown(args.graph_families, set(list_graph_family_names()), "graph family")
+    _warn_unknown(args.algorithms, set(list_flow_algorithm_names()), "algorithm")
+
+
+def _warn_unknown(values: Sequence[str] | None, known: set, label: str) -> None:
+    if not values:
+        return
+    for entry in values:
+        if entry not in known:
+            _logger.warning("Unknown %s: %s (known: %s)", label, entry, sorted(known))
+
+
+def _emit(callback: LoggerCallback | None, event: str, data: dict) -> None:
     """Send structured logs to both stdlib logging and optional callback."""
 
     log_event(event, data)
@@ -350,4 +477,4 @@ def _format_metrics(summary) -> str:
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

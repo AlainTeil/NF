@@ -1,11 +1,15 @@
 """Public API for the network-flow benchmarking package."""
-from .models import BenchmarkConfig, BenchmarkGraph, FlowBenchmarkSummary, FlowMetric
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _pkg_version
+
 from .generators import (
     DEFAULT_DENSITY_PROBABILITIES,
     DEFAULT_NODE_SIZES,
     build_demo_graph,
     build_test_graphs,
 )
+from .models import BenchmarkConfig, BenchmarkGraph, FlowBenchmarkSummary, FlowMetric
+from .reporting import ReportManager, build_report_metadata, format_summary_table
 from .runner import (
     benchmark_flow_algorithms,
     list_flow_algorithm_names,
@@ -13,23 +17,28 @@ from .runner import (
     resolve_flow_algorithms,
     run_benchmarks,
 )
-from .reporting import ReportManager, build_report_metadata, format_summary_table
+
+try:
+    __version__ = _pkg_version("nf-bench")
+except PackageNotFoundError:  # pragma: no cover - package not installed
+    __version__ = "0.0.0+unknown"
 
 __all__ = [
+    "DEFAULT_DENSITY_PROBABILITIES",
+    "DEFAULT_NODE_SIZES",
     "BenchmarkConfig",
+    "BenchmarkGraph",
     "FlowBenchmarkSummary",
     "FlowMetric",
-    "BenchmarkGraph",
-    "DEFAULT_NODE_SIZES",
-    "DEFAULT_DENSITY_PROBABILITIES",
-    "build_demo_graph",
-    "build_test_graphs",
+    "ReportManager",
+    "__version__",
     "benchmark_flow_algorithms",
-    "register_flow_algorithm",
+    "build_demo_graph",
+    "build_report_metadata",
+    "build_test_graphs",
+    "format_summary_table",
     "list_flow_algorithm_names",
+    "register_flow_algorithm",
     "resolve_flow_algorithms",
     "run_benchmarks",
-    "ReportManager",
-    "build_report_metadata",
-    "format_summary_table",
 ]

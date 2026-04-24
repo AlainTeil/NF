@@ -3,7 +3,34 @@ from __future__ import annotations
 import networkx as nx
 import pytest
 
-from nf_bench.generators import build_test_graphs, list_graph_family_names
+from nf_bench.generators import (
+    DEFAULT_DENSITY_PROBABILITIES,
+    DEFAULT_NODE_SIZES,
+    build_test_graphs,
+    list_graph_family_names,
+)
+
+
+@pytest.mark.parametrize("family", list_graph_family_names())
+@pytest.mark.parametrize("size", ["small"])
+@pytest.mark.parametrize("density", sorted(DEFAULT_DENSITY_PROBABILITIES))
+def test_build_test_graphs_matrix(family: str, size: str, density: str) -> None:
+    """Every (family, size, density) triple yields a connected, source/sink-reachable graph."""
+
+    graphs = build_test_graphs(
+        seed=3,
+        size_labels=[size],
+        density_labels=[density],
+        family_names=[family],
+    )
+    assert graphs, f"No graphs produced for {family}/{size}/{density}"
+    for bg in graphs:
+        assert bg.size_label == size
+        assert bg.density_label == density
+        # Source must reach sink in the directed view (post fallback if needed).
+        assert nx.has_path(bg.graph, bg.source, bg.sink)
+        for _, _, data in bg.graph.edges(data=True):
+            assert data["capacity"] > 0
 
 
 def test_build_test_graphs_produces_connected_graphs() -> None:
@@ -37,14 +64,11 @@ def test_build_test_graphs_filtering() -> None:
 
 
 def test_build_test_graphs_invalid_filter_raises() -> None:
-    try:
+    with pytest.raises(ValueError, match="Unknown size labels"):
         build_test_graphs(size_labels=["invalid"])
-    except ValueError as exc:
-        assert "Unknown size labels" in str(exc)
-    else:
-        raise AssertionError("Expected ValueError for unknown size label")
 
 
+@pytest.mark.slow
 def test_build_test_graphs_max_nodes_filters() -> None:
     graphs = build_test_graphs(max_nodes=500)
 
@@ -52,12 +76,8 @@ def test_build_test_graphs_max_nodes_filters() -> None:
 
 
 def test_build_test_graphs_max_nodes_invalid() -> None:
-    try:
+    with pytest.raises(ValueError, match="max_nodes"):
         build_test_graphs(max_nodes=1)
-    except ValueError as exc:
-        assert "max_nodes" in str(exc)
-    else:
-        raise AssertionError("Expected ValueError for invalid max_nodes")
 
 
 def test_build_test_graphs_invalid_family() -> None:
@@ -81,3 +101,8 @@ def test_list_graph_family_names_includes_defaults() -> None:
     families = list_graph_family_names()
     assert "erdos_renyi" in families
     assert "layered_dag" in families
+
+
+def test_default_node_sizes_are_known() -> None:
+    # Sanity check that the size labels referenced by other tests exist.
+    assert "small" in DEFAULT_NODE_SIZES

@@ -8,6 +8,16 @@ version = "0.1.0"
 description = "Network flow benchmarking suite built on NetworkX"
 readme = "README.md"
 requires-python = ">=3.11"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering",
+]
 dependencies = [
     "networkx>=3.2",
     "pandas>=2.1",
@@ -18,14 +28,17 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=7.4",
+    "pytest-cov>=4.1",
     "ruff>=0.6",
+    "mypy>=1.10",
+    "pre-commit>=3.7",
+    "hypothesis>=6.100",
 ]
 telemetry = [
     "psutil>=5.9",
 ]
-plots = [
-    "matplotlib>=3.8",
-    "seaborn>=0.13",
+yaml = [
+    "pyyaml>=6.0",
 ]
 
 [project.scripts]
@@ -34,8 +47,49 @@ nf-bench = "nf_bench.cli:main"
 [tool.setuptools.packages.find]
 include = ["nf_bench*"]
 
+[tool.setuptools.package-data]
+nf_bench = ["py.typed"]
+
 [tool.pytest.ini_options]
-pythonpath = [
-    "nf_bench",
+testpaths = ["tests"]
+addopts = "-ra --strict-markers --cov=nf_bench --cov-report=term-missing"
+markers = [
+    "slow: marks tests as slow (run with `-m slow` or `--no-cov`)",
+    "integration: marks end-to-end CLI tests",
 ]
-addopts = "-ra"
+
+[tool.coverage.run]
+branch = true
+source = ["nf_bench"]
+omit = [
+    "*/__main__.py",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+    "if __name__ == .__main__.:",
+]
+show_missing = true
+skip_covered = false
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]
+ignore = [
+    "B008",  # function call in default argument (common in argparse)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B011"]  # asserts in tests are fine
+
+[tool.mypy]
+python_version = "3.11"
+files = ["nf_bench"]
+ignore_missing_imports = true
+warn_redundant_casts = true

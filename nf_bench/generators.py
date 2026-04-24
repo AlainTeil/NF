@@ -1,30 +1,38 @@
 """Graph construction helpers for network-flow benchmarking."""
 from __future__ import annotations
 
+import itertools
+import logging
 import random
-from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional, Tuple
+from collections.abc import Callable
+from dataclasses import dataclass, field
 
 import networkx as nx
 
 from .models import BenchmarkGraph
 
+_logger = logging.getLogger(__name__)
 
-DEFAULT_NODE_SIZES: Dict[str, int] = {
+# Default upper bound on retry attempts for connectivity-driven graph generation.
+# Surfaced via :class:`GraphBuilderContext` so callers can override per run.
+DEFAULT_MAX_GENERATION_ATTEMPTS = 20
+
+
+DEFAULT_NODE_SIZES: dict[str, int] = {
     "small": 400,
     "medium": 800,
     "large": 1600,
 }
 
-DEFAULT_DENSITY_PROBABILITIES: Dict[str, float] = {
+DEFAULT_DENSITY_PROBABILITIES: dict[str, float] = {
     "sparse": 0.01,
     "medium": 0.03,
     "dense": 0.08,
 }
 
 
-GraphBuilder = Callable[["GraphBuilderContext"], List[BenchmarkGraph]]
-GRAPH_REGISTRY: Dict[str, GraphBuilder] = {}
+GraphBuilder = Callable[["GraphBuilderContext"], list[BenchmarkGraph]]
+GRAPH_REGISTRY: dict[str, GraphBuilder] = {}
 
 
 @dataclass
@@ -33,11 +41,13 @@ class GraphBuilderContext:
 
     family: str
     rng: random.Random
-    capacity_range: Tuple[int, int]
-    node_sizes: Dict[str, int]
-    density_probabilities: Dict[str, float]
-    edge_probability_overrides: Optional[Dict[str, float]]
+    capacity_range: tuple[int, int]
+    node_sizes: dict[str, int]
+    density_probabilities: dict[str, float]
+    edge_probability_overrides: dict[str, float] | None
     capacity_distribution: str
+    max_generation_attempts: int = DEFAULT_MAX_GENERATION_ATTEMPTS
+    fallback_log: list[str] = field(default_factory=list)
 
     def probability_for_density(self, density_label: str) -> float:
         """Return resolved edge probability for the requested density label."""
@@ -55,7 +65,7 @@ def register_graph_family(name: str, builder: GraphBuilder) -> None:
     GRAPH_REGISTRY[name] = builder
 
 
-def list_graph_family_names() -> List[str]:
+def list_graph_family_names() -> list[str]:
     """Return sorted graph family names currently registered."""
 
     return sorted(GRAPH_REGISTRY.keys())
@@ -64,16 +74,16 @@ def list_graph_family_names() -> List[str]:
 def build_test_graphs(
     *,
     seed: int = 42,
-    capacity_range: Tuple[int, int] = (1, 50),
-    node_sizes: Optional[Dict[str, int]] = None,
-    density_probabilities: Optional[Dict[str, float]] = None,
-    size_labels: Optional[List[str]] = None,
-    density_labels: Optional[List[str]] = None,
-    family_names: Optional[List[str]] = None,
-    max_nodes: Optional[int] = None,
-    edge_probability_overrides: Optional[Dict[str, float]] = None,
+    capacity_range: tuple[int, int] = (1, 50),
+    node_sizes: dict[str, int] | None = None,
+    density_probabilities: dict[str, float] | None = None,
+    size_labels: list[str] | None = None,
+    density_labels: list[str] | None = None,
+    family_names: list[str] | None = None,
+    max_nodes: int | None = None,
+    edge_probability_overrides: dict[str, float] | None = None,
     capacity_distribution: str = "uniform",
-) -> List[BenchmarkGraph]:
+) -> list[BenchmarkGraph]:
     """Create directed graphs of varying sizes and densities for benchmarking.
 
     Parameters
@@ -91,7 +101,8 @@ def build_test_graphs(
     density_labels:
         Optional subset of density labels to generate. Defaults to all available labels.
     family_names:
-        Optional subset of registered graph families to generate. Defaults to all registered families.
+        Optional subset of registered graph families to generate. Defaults to all
+        registered families.
     max_nodes:
         Optional upper bound on the number of nodes per generated graph. Labels
         exceeding the bound are discarded.
@@ -103,14 +114,12 @@ def build_test_graphs(
         but propagated for future extensions.
     """
 
-    if node_sizes is None:
-        node_sizes = dict(DEFAULT_NODE_SIZES)
-    else:
-        node_sizes = dict(node_sizes)
-    if density_probabilities is None:
-        density_probabilities = dict(DEFAULT_DENSITY_PROBABILITIES)
-    else:
-        density_probabilities = dict(density_probabilities)
+    node_sizes = dict(DEFAULT_NODE_SIZES) if node_sizes is None else dict(node_sizes)
+    density_probabilities = (
+        dict(DEFAULT_DENSITY_PROBABILITIES)
+        if density_probabilities is None
+        else dict(density_probabilities)
+    )
 
     if size_labels is not None:
         missing_sizes = set(size_labels) - node_sizes.keys()
@@ -150,7 +159,7 @@ def build_test_graphs(
         raise ValueError(f"Unknown graph families requested: {sorted(missing)}")
 
     rng = random.Random(seed)
-    test_graphs: List[BenchmarkGraph] = []
+    test_graphs: list[BenchmarkGraph] = []
 
     for family in selected_families:
         builder = GRAPH_REGISTRY[family]
@@ -188,11 +197,18 @@ def _generate_connected_digraph(
     n_nodes: int,
     edge_probability: float,
     rng: random.Random,
-    capacity_range: Tuple[int, int],
+    capacity_range: tuple[int, int],
     source: int,
     sink: int,
-) -> nx.DiGraph:
-    """Generate a directed graph that is weakly connected between source and sink."""
+    max_attempts: int = DEFAULT_MAX_GENERATION_ATTEMPTS,
+) -> tuple[nx.DiGraph, bool]:
+    """Generate a directed graph weakly connected between source and sink.
+
+    Returns ``(graph, fallback)`` where ``fallback`` is ``True`` when the
+    retry budget was exhausted and the linear-chain fallback was used. The
+    fallback graph is no longer Erdos-Renyi-distributed; callers should record
+    this in their metadata so downstream benchmarks aren't misinterpreted.
+    """
 
     if n_nodes < 2:
         raise ValueError("n_nodes must be at least 2 to define distinct source and sink")
@@ -204,10 +220,7 @@ def _generate_connected_digraph(
     graph = nx.DiGraph()
     graph.add_nodes_from(range(n_nodes))
 
-    attempt = 0
-    max_attempts = 20
-    while attempt < max_attempts:
-        attempt += 1
+    for _ in range(max_attempts):
         attempt_seed = rng.randint(0, 2**32 - 1)
         candidate = nx.gnp_random_graph(
             n=n_nodes,
@@ -224,14 +237,22 @@ def _generate_connected_digraph(
         _ensure_source_sink_connection(graph, source, sink, rng, low, high)
 
         if nx.has_path(nx.Graph(graph), source, sink):
-            return graph
+            return graph, False
 
+    _logger.warning(
+        "Falling back to linear-chain graph for n=%s p=%s after %s attempts",
+        n_nodes,
+        edge_probability,
+        max_attempts,
+    )
+    graph.clear()
+    graph.add_nodes_from(range(n_nodes))
     for node in range(n_nodes - 1):
         if node == sink:
             continue
         graph.add_edge(node, node + 1, capacity=rng.randint(low, high))
     graph.add_edge(n_nodes - 2, sink, capacity=rng.randint(low, high))
-    return graph
+    return graph, True
 
 
 def _assign_positive_capacities(
@@ -254,20 +275,23 @@ def _ensure_source_sink_connection(
     low: int,
     high: int,
 ) -> None:
-    """Add edges until the underlying undirected graph is connected."""
+    """Add edges until the underlying undirected graph is connected.
 
-    undirected = graph.to_undirected(as_view=False)
-    components = list(nx.connected_components(undirected))
+    Uses ``nx.connected_components`` once per iteration; each iteration adds at
+    least one cross-component edge, so the loop terminates in O(C) iterations
+    where C is the initial number of components.
+    """
 
-    while len(components) > 1:
+    while True:
+        undirected = graph.to_undirected(as_view=True)
+        components = list(nx.connected_components(undirected))
+        if len(components) <= 1:
+            break
         left = rng.choice(tuple(components[0]))
         right = rng.choice(tuple(components[1]))
         graph.add_edge(left, right, capacity=rng.randint(low, high))
         if rng.random() < 0.5:
             graph.add_edge(right, left, capacity=rng.randint(low, high))
-
-        undirected = graph.to_undirected(as_view=False)
-        components = list(nx.connected_components(undirected))
 
     if graph.out_degree(source) == 0:
         target_candidates = [node for node in graph.nodes if node != source]
@@ -281,10 +305,10 @@ def _ensure_source_sink_connection(
 
 
 def _resolve_probability_override(
-    overrides: Optional[Dict[str, float]],
+    overrides: dict[str, float] | None,
     family: str,
     density_label: str,
-) -> Optional[float]:
+) -> float | None:
     if not overrides:
         return None
     keys = (
@@ -298,20 +322,27 @@ def _resolve_probability_override(
     return None
 
 
-def _split_layers(n_nodes: int) -> List[List[int]]:
+def _split_layers(n_nodes: int) -> list[list[int]]:
+    """Partition ``range(n_nodes)`` into 2..6 contiguous layers.
+
+    Targets roughly 150 nodes per layer; clamped to a minimum of 2 layers (so
+    every layered DAG actually has a notion of source/sink layer) and a
+    maximum of 6 (to keep small graphs from becoming too deep).
+    """
+
     if n_nodes < 2:
         raise ValueError("Layered graphs require at least two nodes")
-    layer_count = min(max(2, n_nodes // 150 or 2), min(6, n_nodes))
-    base = n_nodes // layer_count
-    remainder = n_nodes % layer_count
-    layers: List[List[int]] = []
+
+    target_layers = max(2, n_nodes // 150)
+    layer_count = min(target_layers, 6, n_nodes)
+
+    base, remainder = divmod(n_nodes, layer_count)
+    layers: list[list[int]] = []
     current = 0
     for idx in range(layer_count):
-        size = base + (1 if idx < remainder else 0)
-        size = max(1, size)
-        layer_nodes = list(range(current, current + size))
+        size = max(1, base + (1 if idx < remainder else 0))
+        layers.append(list(range(current, current + size)))
         current += size
-        layers.append(layer_nodes)
     if layers[-1][-1] != n_nodes - 1:
         layers[-1][-1] = n_nodes - 1
     return layers
@@ -326,32 +357,38 @@ def _graph_family(name: str):
 
 
 @_graph_family("erdos_renyi")
-def _build_erdos_renyi_graphs(context: GraphBuilderContext) -> List[BenchmarkGraph]:
-    graphs: List[BenchmarkGraph] = []
+def _build_erdos_renyi_graphs(context: GraphBuilderContext) -> list[BenchmarkGraph]:
+    graphs: list[BenchmarkGraph] = []
     low, high = context.capacity_range
 
     for size_label, n_nodes in context.node_sizes.items():
         source = 0
         sink = n_nodes - 1
 
-        for density_label in context.density_probabilities.keys():
+        for density_label in context.density_probabilities:
             edge_prob = context.probability_for_density(density_label)
-            graph = _generate_connected_digraph(
+            graph, fallback = _generate_connected_digraph(
                 n_nodes=n_nodes,
                 edge_probability=edge_prob,
                 rng=context.rng,
                 capacity_range=(low, high),
                 source=source,
                 sink=sink,
+                max_attempts=context.max_generation_attempts,
             )
+            name = f"erdos_renyi_{size_label}_{density_label}"
+            if fallback:
+                name += "_fallback"
+                context.fallback_log.append(name)
             graphs.append(
                 BenchmarkGraph(
-                    name=f"erdos_renyi_{size_label}_{density_label}",
+                    name=name,
                     graph=graph,
                     source=source,
                     sink=sink,
                     size_label=size_label,
                     density_label=density_label,
+                    fallback=fallback,
                 )
             )
 
@@ -359,8 +396,8 @@ def _build_erdos_renyi_graphs(context: GraphBuilderContext) -> List[BenchmarkGra
 
 
 @_graph_family("layered_dag")
-def _build_layered_dag_graphs(context: GraphBuilderContext) -> List[BenchmarkGraph]:
-    graphs: List[BenchmarkGraph] = []
+def _build_layered_dag_graphs(context: GraphBuilderContext) -> list[BenchmarkGraph]:
+    graphs: list[BenchmarkGraph] = []
     low, high = context.capacity_range
 
     for size_label, n_nodes in context.node_sizes.items():
@@ -368,14 +405,16 @@ def _build_layered_dag_graphs(context: GraphBuilderContext) -> List[BenchmarkGra
         source = layers[0][0]
         sink = layers[-1][-1]
 
-        for density_label in context.density_probabilities.keys():
+        for density_label in context.density_probabilities:
             prob = context.probability_for_density(density_label)
             g = nx.DiGraph()
             g.add_nodes_from(range(n_nodes))
             local_rng = random.Random(context.rng.randint(0, 2**32 - 1))
 
-            spine_nodes = [layer[0] for layer in layers]
-            for u, v in zip(spine_nodes, spine_nodes[1:]):
+            # Spine guarantees a source -> ... -> sink path even when the
+            # randomised inter-layer edges miss the sink entirely.
+            spine_nodes = [layer[0] for layer in layers[:-1]] + [sink]
+            for u, v in itertools.pairwise(spine_nodes):
                 g.add_edge(u, v)
 
             for idx in range(len(layers) - 1):
